@@ -1470,9 +1470,9 @@ HttpServer::HttpServer(luce::engine::LuceEngine & engine,
     curl_global_init(CURL_GLOBAL_DEFAULT);
     #endif
     prefix_cache_.init_full_cache(config.prefill_cache_cap);
-    // Single-sequence commits prune superseded snapshots (see
-    // trim_snapshots_after_commit); the paged scheduler does not.
-    prefix_cache_.set_prunes_superseded(!config.concurrent_prefix_cache);
+    // Commits prune the snapshots they supersede: single-sequence serving in
+    // trim_snapshots_after_commit, the concurrent scheduler as each capture lands.
+    prefix_cache_.set_prunes_superseded(true);
     // Fold model+config identity into the layout fingerprint BEFORE init()
     // so compute_layout_id sees it on every learn/verify call. Prevents stale
     // KV hits when the server restarts over the same --kv-cache-dir with a
@@ -2415,7 +2415,9 @@ void apply_request_reasoning(
     }
     if (body.contains("thinking") && body["thinking"].is_object()) {
         const auto & thinking = body["thinking"];
-        if (thinking.contains("type")) {
+        // "adaptive" (Claude Code's default) leaves thinking to the model: the
+        // same as no thinking field.
+        if (thinking.contains("type") && thinking.value("type", "") != "adaptive") {
             const bool enabled = thinking.value("type", "") == "enabled";
             enable_thinking = enabled;
             req.thinking_opt_in = enabled;
@@ -2560,7 +2562,9 @@ bool HttpServer::render_and_tokenize_request(
     if (!render_messages_to_text(chat_messages, req,
                                  /*add_generation_prompt=*/true,
                                  req.rendered_prompt, error)) {
-        send_error(fd, 500, error);
+        // The template rejected these messages: a client error, which a
+        // client must not retry as it would a server failure.
+        send_error(fd, 400, error);
         return false;
     }
     req.started_in_thinking = prompt_ends_in_open_think(req.rendered_prompt);
@@ -2973,6 +2977,9 @@ json build_openai_completion_response(
         {"completion_tokens_details", {
             {"reasoning_tokens", counts.reasoning},
         }},
+        {"prompt_tokens_details", {
+            {"cached_tokens", timings.cached_prefix_tokens},
+        }},
         {"timings", build_timings_json(timings, counts.total)},
         {"accept_rate", result.accept_rate},
         {"spec_decode_ran", result.spec_decode_ran},
@@ -3073,6 +3080,9 @@ json build_responses_api_response(
         {"input_tokens", prompt_tokens},
         {"output_tokens", counts.total},
         {"total_tokens", prompt_tokens + counts.total},
+        {"input_tokens_details", {
+            {"cached_tokens", timings.cached_prefix_tokens},
+        }},
         {"timings", build_timings_json(timings, counts.total)},
         {"accept_rate", result.accept_rate},
         {"spec_decode_ran", result.spec_decode_ran},
@@ -3667,10 +3677,9 @@ bool HttpServer::forward_upstream(
 }
 
 std::vector<int> HttpServer::request_restore_points(const std::vector<int32_t> & prompt,
-                                                    bool ends_with_tool_result,
                                                     std::initializer_list<int> cuts) const {
     return prefix_restore_points(prompt, prefix_cache_.chat_markers(), cuts,
-        /*drop_last_boundary=*/!(backend_.prefill_cuts_at_restore_points() && ends_with_tool_result),
+        /*drop_last_boundary=*/!backend_.prefill_cuts_at_restore_points(),
         backend_.restore_point_spacing());
 }
 
@@ -4033,8 +4042,7 @@ HttpServer::GenerationCacheState HttpServer::prepare_generation_cache(
             [this](int target_cut) {
                 return backend_.snapshot_bytes_estimate(target_cut);
             },
-            req.ends_with_tool_result, reachable_from,
-            backend_.restore_point_spacing());
+            reachable_from, backend_.restore_point_spacing());
         cache.snap_slot = cache.snap_reservation.slot();
         cache.snap_cut = cache.snap_reservation.target_cut();
     };
@@ -4114,7 +4122,7 @@ HttpServer::GenerationCacheState HttpServer::prepare_generation_cache(
 
     if (!prefix_cache_.disabled() || !disk_cache_.disabled()) {
         generate_request.restore_points = request_restore_points(
-            effective_prompt, req.ends_with_tool_result,
+            effective_prompt,
             {forced_cut, selected_boundary,
              cache.snap_prepared ? cache.snap_cut : 0});
     }
