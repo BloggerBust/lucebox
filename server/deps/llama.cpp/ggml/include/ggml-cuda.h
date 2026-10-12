@@ -162,6 +162,13 @@ GGML_BACKEND_API int ggml_backend_cuda_set_mmvq_max_ncols_override(int max_ncols
 // Returns the previous setting.
 GGML_BACKEND_API bool ggml_backend_cuda_set_mmvq_batch_invariant(bool enabled);
 
+// A MUL_MAT node whose src0 is a column range of wider Q8_0 rows (a view with
+// the rows' stride, e.g. one rank's slice of a contraction): on the RDNA4 Q8_0
+// matvec every block keeps the lane it takes in the whole rows, so the product
+// is bit-identical to the whole rows times src1 zero-padded outside the range,
+// at the range's reads. Other kernels compute the range's product as usual.
+GGML_BACKEND_API void ggml_backend_cuda_mul_mat_whole_row_lanes(struct ggml_tensor * mul_mat);
+
 // Calling-thread DS4 mixed-expert dispatch ceiling, scoped to a graph compute.
 // Accepts 0 (the default of five) or 1..16; returns the previous ceiling.
 GGML_BACKEND_API int ggml_backend_cuda_set_ds4_mix_mmv_max_tokens_override(int max_tokens);
