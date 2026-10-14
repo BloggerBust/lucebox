@@ -12,6 +12,7 @@
 //                              [--max-tokens 4096] [--target-device auto:0]
 
 #include "http_server.h"
+#include "admission.h"
 #include "chat_template.h"
 #include "launch_profiles.h"
 #include "model_card.h"
@@ -1389,6 +1390,52 @@ static int load_model(ModelOptions & model, LoadedModel & loaded, bool multi_mod
             std::fprintf(stderr, "[server] invalid PFlash configuration: %s\n", error.c_str());
             return 1;
         }
+        // Concurrent dense Qwen3.5 serving compresses on a thread of its own
+        // while the slots decode: the target stays resident, and the paged
+        // pool leaves the drafter the memory to score a prompt that fills the
+        // context (longer ones are refused, see validate_request_context).
+        // That memory was measured for the trained head's scorer with the
+        // drafter released after each prompt.
+        if (bargs.max_concurrency > 1 &&
+            inspect_gguf_model_info(bargs.model_path.c_str()).arch == "qwen35") {
+            const char * head = std::getenv("PFLASH_SCORING_HEAD_GGUF");
+            const char * legacy = std::getenv("PFLASH_QWEN35_LEGACY_SCORER");
+            luce::pflash::PFlashSelectionConfig selection;
+            std::string selection_error;
+            if (!head || !*head || (legacy && std::strcmp(legacy, "1") == 0) ||
+                !luce::pflash::resolve_pflash_selection(1 << 16, 32, selection, selection_error) ||
+                selection.mode == luce::pflash::PFlashSelectionMode::Legacy ||
+                selection.scorer != luce::pflash::PFlashScorer::Head) {
+                std::fprintf(stderr,
+                    "[server] PFlash with --max-concurrency > 1 needs the release profile's "
+                    "strict selection with the trained head's scorer (set "
+                    "PFLASH_SCORING_HEAD_GGUF; no legacy or split scorer)\n");
+                return 1;
+            }
+            if (sconfig.draft_residency == DraftResidencyPolicy::Persistent) {
+                std::fprintf(stderr,
+                    "[server] PFlash with --max-concurrency > 1 needs the drafter released after "
+                    "each prompt: --draft-residency persistent keeps its scoring sessions on the "
+                    "device, outside the memory reserved for it\n");
+                return 1;
+            }
+            if (!sconfig.pflash_skip_park) {
+                sconfig.pflash_skip_park = true;
+                std::fprintf(stderr,
+                    "[server] PFlash with --max-concurrency %d: the drafter scores beside the "
+                    "resident target (--prefill-skip-park)\n", bargs.max_concurrency);
+            }
+            std::error_code size_error;
+            const auto drafter_bytes =
+                std::filesystem::file_size(sconfig.pflash_drafter_path, size_error);
+            bargs.kv_pool_reserve_bytes = pflash_concurrent_reserve_bytes(
+                size_error ? 0 : (long long)drafter_bytes, bargs.device.max_ctx);
+            std::fprintf(stderr,
+                "[server] PFlash with --max-concurrency %d: %.2f GiB of device memory "
+                "reserved for the drafter, for prompts up to %d tokens\n",
+                bargs.max_concurrency, bargs.kv_pool_reserve_bytes / 1073741824.0,
+                bargs.device.max_ctx);
+        }
     }
     auto & spark_autotune = model.spark_autotune;
     auto & spark_slots = model.spark_slots;
@@ -1611,6 +1658,13 @@ static int load_model(ModelOptions & model, LoadedModel & loaded, bool multi_mod
     sconfig.pflash_drafter_gpu = pflash_placement.drafter_gpu;
     sconfig.pflash_remote_drafter = pflash_placement.remote_drafter;
     sconfig.pflash_remote = pflash_placement.remote;
+    if (sconfig.pflash_remote_drafter && backend_execution.max_concurrency > 1 &&
+        arch == "qwen35") {
+        std::fprintf(stderr,
+            "[server] PFlash with --max-concurrency > 1 needs an in-process drafter "
+            "(the IPC drafter is single-request only)\n");
+        return 2;
+    }
 
     // ── Apply environment defaults ─────────────────────────────────────
     // --freq / --collect-routing: enable routing stats via env vars that
