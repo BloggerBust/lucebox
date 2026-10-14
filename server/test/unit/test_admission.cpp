@@ -15,8 +15,8 @@ TEST_CASE(AdmissionFixture, test_oversized_no_compression_rejects) {
     CHECK(should_reject_oversized(900, 200, 1024, false));
 }
 
-TEST_CASE(AdmissionFixture, test_oversized_with_compression_accepts) {
-    CHECK(!should_reject_oversized(167000, 2048, 65536, true));
+TEST_CASE(AdmissionFixture, test_reply_over_limit_with_compression_accepts) {
+    CHECK(!should_reject_oversized(65000, 2048, 65536, true));
 }
 
 TEST_CASE(AdmissionFixture, test_exactly_at_limit_accepts) {
@@ -28,8 +28,8 @@ TEST_CASE(AdmissionFixture, test_one_over_limit_no_compression_rejects) {
     CHECK(should_reject_oversized(1025, 0, 1024, false));
 }
 
-TEST_CASE(AdmissionFixture, test_one_over_limit_with_compression_accepts) {
-    CHECK(!should_reject_oversized(1025, 0, 1024, true));
+TEST_CASE(AdmissionFixture, test_one_over_limit_with_compression_rejects) {
+    CHECK(should_reject_oversized(1025, 0, 1024, true));
 }
 
 TEST_CASE(AdmissionFixture, test_effective_overflows_compressed_within_budget) {
@@ -68,4 +68,16 @@ TEST_CASE(AdmissionFixture, test_reply_fits_what_the_prompt_leaves) {
                                    131072, false));
     CHECK(should_reject_oversized(140000, fit_reply_to_context(140000, 32000, 131072),
                                   131072, false));
+}
+
+// With compression on, --max-ctx is the longest raw prompt PFlash takes (the drafter scores it whole): a prompt
+// that fills the context passes even when its reply would not fit, since compression makes room; a longer one is
+// refused.
+TEST_CASE(AdmissionFixture, test_oversized_with_compression_respects_max_ctx) {
+    CHECK(!should_reject_oversized(204800, 1, 204800, true));
+    CHECK(!should_reject_oversized(200000, 32000, 204800, true));
+    CHECK(should_reject_oversized(204801, 0, 204800, true));
+    CHECK(should_reject_oversized(200000, 1, 139264, true));
+    CHECK(should_reject_oversized(204800, 1, 204800, false));
+    CHECK(!should_reject_oversized(1000, 1, 139264, false));
 }

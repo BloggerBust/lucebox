@@ -1,6 +1,8 @@
 #pragma once
+
 // Admission gate: reject oversized requests with HTTP 400.
-// When compression is enabled, lets oversized requests through — post-compress check is the real gate.
+// When compression is enabled, a raw prompt up to --max-ctx is let through even if its reply does not fit — the
+// post-compress check is the real gate.
 
 #include <algorithm>
 
@@ -19,8 +21,11 @@ inline bool should_reject_oversized(int prompt_tokens, int max_output,
     if (prompt_tokens + max_output <= max_ctx) {
         return false;  // fits — accept regardless of compression
     }
-    // Oversized: only reject if compression cannot help.
-    return !compression_enabled;
+    // Oversized: reject if compression cannot help, or if the raw prompt is
+    // longer than --max-ctx, the longest prompt PFlash takes (the drafter
+    // scores it whole).
+    if (!compression_enabled) return true;
+    return prompt_tokens > max_ctx;
 }
 
 // Post-compress gate: check whether the effective context overflows max_ctx.

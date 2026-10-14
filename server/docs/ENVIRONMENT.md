@@ -12,6 +12,10 @@ Anything else in the inventory below is legacy surface: prefer the CLI flag
 where one exists, and treat undocumented variables as internal. The
 consolidation of this list into CLI flags is tracked as follow-up work.
 
+PFlash's existing tuning, serving and evaluation overrides are documented in
+[PFlash configuration](PFLASH_CONFIGURATION.md), including the measured release
+profile and the requirements checked at startup.
+
 ## Documented variables
 
 | Variable | Default | Purpose |
@@ -435,7 +439,5 @@ consolidation of this list into CLI flags is tracked as follow-up work.
 - `LUCE_PC_DEEP_FIRST_MIN` - prefix_cache.cpp
 - `LUCE_QK_FUSE_LAYERS` - laguna_target_graph.cpp
 - `LUCE_QK_FUSE_MODE` - laguna_target_graph.cpp
-- `PFLASH_DRAFTER_EARLY_EXIT_N` - qwen3_graph.cpp
-- `PFLASH_DRAFTER_SCORE_LAYERS` - qwen3_graph.cpp
 - `PFLASH_FREEZE_HOT_WINDOW` - http_server.cpp
 - `TMPDIR` - backend_ipc.cpp, moe_expert_compute_ipc.cpp
