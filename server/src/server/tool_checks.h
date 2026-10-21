@@ -59,7 +59,7 @@ private:
 // client did not set "tool_checks": false (top level or extra_body).
 bool requested(const json & body, bool server_default);
 
-// Returns true if the request set tool_choice "none" (or {"type": "none"}).
+bool tool_choice_is_none(const json & tool_choice);
 bool tools_off(const json & body);
 
 // The request the model answers: rules added to the system message, thinking

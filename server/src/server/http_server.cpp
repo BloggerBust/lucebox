@@ -3694,8 +3694,7 @@ bool HttpServer::attach_output_constraint(SocketHandle fd, ParsedRequest & req) 
         send_error(fd, 400, error);
         return false;
     }
-    const bool tools_off = req.tool_choice == "none" ||
-        http_detail::string_member(req.tool_choice, "type") == "none";
+    const bool tools_off = tool_checks::tool_choice_is_none(req.tool_choice);
     const bool has_tools = req.tools.is_array() && !req.tools.empty() && !tools_off;
     const bool must_call = has_tools && http_detail::tool_choice_requires_call(req.tool_choice);
     if (schema.is_null() && !must_call) return true;

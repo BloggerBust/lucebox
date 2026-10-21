@@ -203,10 +203,13 @@ bool requested(const json & body, bool server_default) {
     return server_default;
 }
 
+bool tool_choice_is_none(const json & tool_choice) {
+    return tool_choice == "none" || string_field(tool_choice, "type") == "none";
+}
+
 bool tools_off(const json & body) {
-    if (!body.is_object() || !body.contains("tool_choice")) return false;
-    const json & choice = body["tool_choice"];
-    return choice == "none" || string_field(choice, "type") == "none";
+    return body.is_object() && body.contains("tool_choice") &&
+           tool_choice_is_none(body["tool_choice"]);
 }
 
 json agent_request(const json & body, const std::string & effort) {
