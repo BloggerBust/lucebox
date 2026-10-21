@@ -35,6 +35,13 @@ const char kFinalNote[] =
     "Otherwise give the same answer again. Do not mention this note or the check "
     "in your reply.";
 
+const char kNoToolsNote[] =
+    "Reviewer note, not from the user: tools are not available for this reply, "
+    "so the tool calls in your last message cannot run. Give your final answer "
+    "as text, from what you already know and the tool results above. If a part "
+    "cannot be done without a tool, say plainly which. Do not mention this note "
+    "in your reply.";
+
 namespace {
 
 // How far from the end of a final answer a question mark counts as asking the
@@ -185,7 +192,6 @@ bool requested(const json & body, bool server_default) {
         body["tools"].empty()) {
         return false;
     }
-    if (body.contains("tool_choice") && body["tool_choice"] == "none") return false;
     if (body.contains("tool_checks") && body["tool_checks"].is_boolean()) {
         return body["tool_checks"].get<bool>();
     }
@@ -197,11 +203,18 @@ bool requested(const json & body, bool server_default) {
     return server_default;
 }
 
+bool tools_off(const json & body) {
+    if (!body.is_object() || !body.contains("tool_choice")) return false;
+    const json & choice = body["tool_choice"];
+    return choice == "none" || string_field(choice, "type") == "none";
+}
+
 json agent_request(const json & body, const std::string & effort) {
     json request = body;
     request["stream"] = false;
     request.erase("stream_options");
     request["tool_checks"] = false;
+    if (tools_off(body)) return request;
     if (!effort.empty() && !chose_thinking(body)) request["reasoning_effort"] = effort;
 
     if (!request.contains("messages") || !request["messages"].is_array()) return request;
@@ -245,6 +258,10 @@ bool needs_replan(const json & reply) {
     std::set<std::string> names;
     for (const auto & call : calls_of(reply)) names.insert(call_key(call).first);
     return names.size() > 1;
+}
+
+bool needs_tool_free_reply(const json & body, const json & reply) {
+    return tools_off(body) && !calls_of(reply).empty();
 }
 
 bool needs_final_check(const json & messages, const json & reply,

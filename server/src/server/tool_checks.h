@@ -8,7 +8,9 @@
 //      ones that need nothing from the others;
 //   3. checks a final answer given after tool results, once per user request:
 //      the model goes through the request part by part, and its new turn is
-//      kept only if it makes tool calls that have not already failed.
+//      kept only if it makes tool calls that have not already failed;
+//   4. if the model calls a tool when tool_choice is "none", retry once with
+//      a note that tools are unavailable and skip the other tool checks.
 //
 // Every pass is the same model on the same cached conversation; there is no
 // second model and nothing specific to one model family. The functions below
@@ -33,6 +35,7 @@ extern const char kEffort[];
 extern const char kRules[];
 extern const char kReplanNote[];
 extern const char kFinalNote[];
+extern const char kNoToolsNote[];
 
 // Ids of the tool calls a final check added, so the next final answer of the
 // same user request goes out as is. The ids stay as the model made them, so
@@ -52,10 +55,12 @@ private:
     std::unordered_set<std::string> ids_;
 };
 
-// The request gets checks: it has tools the model may call, the server has
-// checks on, and the client did not set "tool_checks": false (top level or
-// extra_body).
+// The request gets checks: it has tools, the server has checks on, and the
+// client did not set "tool_checks": false (top level or extra_body).
 bool requested(const json & body, bool server_default);
+
+// Returns true if the request set tool_choice "none" (or {"type": "none"}).
+bool tools_off(const json & body);
 
 // The request the model answers: rules added to the system message, thinking
 // on at `effort` unless the client chose, non-streaming, and checks off so the
@@ -70,6 +75,10 @@ json * reply_message(json & response);
 
 // The reply calls two or more different tools.
 bool needs_replan(const json & reply);
+
+// Returns true if the reply calls a tool even though the request set
+// tool_choice "none".
+bool needs_tool_free_reply(const json & body, const json & reply);
 
 // The reply is a final answer after tool results, does not end by asking the
 // user something, and no check has added work since the last user message.
