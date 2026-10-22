@@ -1,5 +1,10 @@
 <p align="center">
-  <a href="https://www.lucebox.com/"><img src="https://www.lucebox.com/lucebox-logo.png" alt="Lucebox" width="160"></a>
+  <a href="https://www.lucebox.com/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/logo-mark-white.png">
+      <img src="assets/logo-mark.png" alt="Lucebox" width="160">
+    </picture>
+  </a>
 </p>
 
 <p align="center">
@@ -12,8 +17,8 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-e8e8ed?style=for-the-badge&labelColor=090909" alt="Apache 2.0"></a>
-  <a href="https://developer.nvidia.com/cuda-toolkit"><img src="https://img.shields.io/badge/CUDA-12%2B-76b900?style=for-the-badge&logo=nvidia&logoColor=76b900&labelColor=090909" alt="CUDA 12+"></a>
-  <a href="https://rocm.docs.amd.com/projects/HIP/en/latest/"><img src="https://img.shields.io/badge/HIP-7%2B-ed1c24?style=for-the-badge&logo=amd&logoColor=ed1c24&labelColor=090909" alt="HIP 7+"></a>
+  <a href="https://developer.nvidia.com/cuda-toolkit"><img src="https://img.shields.io/badge/CUDA-12%2B-e8e8ed?style=for-the-badge&logo=nvidia&logoColor=e8e8ed&labelColor=090909" alt="CUDA 12+"></a>
+  <a href="https://rocm.docs.amd.com/projects/HIP/en/latest/"><img src="https://img.shields.io/badge/HIP-7%2B-e8e8ed?style=for-the-badge&logo=amd&logoColor=e8e8ed&labelColor=090909" alt="HIP 7+"></a>
   <a href="https://isocpp.org"><img src="https://img.shields.io/badge/C%2B%2B-17-e8e8ed?style=for-the-badge&logo=cplusplus&logoColor=e8e8ed&labelColor=090909" alt="C++17"></a>
 </p>
 
@@ -288,7 +293,7 @@ Video tutorials for each optimization and the harness setup.
 
 ## The Lucebox Machine
 
-Local AI should be the default, not a privilege. Private data, no per-token bill, no vendor lock-in. Lucebox pairs the R9700 with Strix Halo and ships this open engine ready to run.
+Local AI should be the default, not a privilege. Private data, no per-token bill, no vendor lock-in. Lucebox Zero 495 pairs the R9700 with the Ryzen AI MAX+ PRO 495 (128 or 192 GB) and ships this open engine ready to run.
 
 <p align="center">
   <a href="https://www.lucebox.com/"><img src="assets/lucebox.png" alt="Lucebox local AI PC" width="85%" /></a>
