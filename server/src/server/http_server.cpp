@@ -4477,21 +4477,23 @@ bool HttpServer::serve_with_tool_checks(SocketHandle fd, ParsedRequest & req,
     open_stream();
 
     // If the model calls a tool when tool_choice is "none", retry
-    // once with a note that tools are unavailable. Use the retry only
-    // if it does not call a tool.
+    // once with a note that tools are unavailable. If the retry still
+    // calls one, drop its calls and send its text, so no tool call
+    // reaches the client.
     const bool tools_off = tc::tools_off(request);
     const char * tool_free = "-";
     const char * replan = "-";
     const char * final_check = "-";
     if (tc::needs_tool_free_reply(request, *reply)) {
         json again;
-        json * again_reply = pass(tc::with_note(request, *reply, tc::kNoToolsNote), again)
-            ? tc::reply_message(again) : nullptr;
-        tool_free = "kept";
-        if (again_reply && !tc::needs_tool_free_reply(request, *again_reply)) {
+        if (pass(tc::with_note(request, *reply, tc::kNoToolsNote), again)) {
             response = std::move(again);
             reply = tc::reply_message(response);
-            tool_free = "replaced";
+        }
+        tool_free = "replaced";
+        if (tc::needs_tool_free_reply(request, *reply)) {
+            tc::drop_calls(response);
+            tool_free = "dropped";
         }
     }
     if (!tools_off && tc::needs_replan(*reply)) {

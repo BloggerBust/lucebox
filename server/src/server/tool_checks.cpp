@@ -267,6 +267,14 @@ bool needs_tool_free_reply(const json & body, const json & reply) {
     return tools_off(body) && !calls_of(reply).empty();
 }
 
+void drop_calls(json & response) {
+    json * reply = reply_message(response);
+    if (!reply) return;
+    reply->erase("tool_calls");
+    if (!reply->contains("content") || (*reply)["content"].is_null()) (*reply)["content"] = "";
+    response["choices"][0]["finish_reason"] = "stop";
+}
+
 bool needs_final_check(const json & messages, const json & reply,
                        const CheckedCalls & checked) {
     if (!calls_of(reply).empty() || !messages.is_array()) return false;

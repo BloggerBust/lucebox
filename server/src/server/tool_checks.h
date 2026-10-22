@@ -10,7 +10,9 @@
 //      the model goes through the request part by part, and its new turn is
 //      kept only if it makes tool calls that have not already failed;
 //   4. if the model calls a tool when tool_choice is "none", retry once with
-//      a note that tools are unavailable and skip the other tool checks.
+//      a note that tools are unavailable and skip the other tool checks; if
+//      the retry still calls one, its calls are dropped and its text is the
+//      answer, so no tool call reaches the client.
 //
 // Every pass is the same model on the same cached conversation; there is no
 // second model and nothing specific to one model family. The functions below
@@ -79,6 +81,10 @@ bool needs_replan(const json & reply);
 // Returns true if the reply calls a tool even though the request set
 // tool_choice "none".
 bool needs_tool_free_reply(const json & body, const json & reply);
+
+// Removes the tool calls from the reply of a chat.completion response, so it
+// goes out as a plain answer with finish_reason "stop".
+void drop_calls(json & response);
 
 // The reply is a final answer after tool results, does not end by asking the
 // user something, and no check has added work since the last user message.

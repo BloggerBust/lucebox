@@ -118,6 +118,19 @@ static void test_tool_free_reply() {
     body["tool_choice"] = {{"type", "none"}};
     CHECK(tools_off(body));
     CHECK(needs_tool_free_reply(body, calls));
+
+    // A reply that still calls tools goes out as its text alone.
+    json response = {{"choices", json::array({{
+        {"index", 0}, {"finish_reason", "tool_calls"}, {"message", calls}}})}};
+    (*reply_message(response))["content"] = "Listing.";
+    drop_calls(response);
+    CHECK(!needs_tool_free_reply(body, *reply_message(response)));
+    CHECK((*reply_message(response))["content"] == "Listing.");
+    CHECK(response["choices"][0]["finish_reason"] == "stop");
+    response["choices"][0]["message"] = calls;
+    (*reply_message(response))["content"] = nullptr;
+    drop_calls(response);
+    CHECK((*reply_message(response))["content"] == "");
 }
 
 static void test_replan() {

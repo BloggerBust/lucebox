@@ -668,14 +668,12 @@ TEST_CASE(ModelRoutingFixture, test_tool_choice_none_re_asks_once_for_a_tool_fre
         models.first.engine.finish();
         const auto body = response_body(models.post(request).read());
         const auto & choice = body.at("choices").at(0);
-        if (re_ask_token == 3) {
-            ROUTING_CHECK(choice.at("message").at("content") == "y");
-            ROUTING_CHECK(!choice.at("message").contains("tool_calls"));
-            ROUTING_CHECK(choice.at("finish_reason") == "stop");
-        } else {
-            ROUTING_CHECK(choice.at("message").at("tool_calls").size() == 2);
-            ROUTING_CHECK(choice.at("finish_reason") == "tool_calls");
-        }
+        // Either way no tool call reaches the client: a retry that still
+        // calls tools goes out as its text alone.
+        const std::string content = choice.at("message").at("content");
+        ROUTING_CHECK(re_ask_token == 3 ? content == "y" : content.rfind("Listing.", 0) == 0);
+        ROUTING_CHECK(!choice.at("message").contains("tool_calls"));
+        ROUTING_CHECK(choice.at("finish_reason") == "stop");
         std::lock_guard<std::mutex> lock(models.first.engine.mu);
         ROUTING_CHECK(models.first.engine.admissions == 2);
     }
