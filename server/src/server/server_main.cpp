@@ -10,6 +10,8 @@
 //   luce_server <model.gguf> [--draft <draft.gguf>] [--port 8080]
 //                              [--host 0.0.0.0] [--max-ctx 131072]
 //                              [--max-tokens 4096] [--target-device auto:0]
+//   luce_server <moss-image.gguf> --text-encoder <Qwen3.5-9B.gguf> [--text-encoder-device hip:N] [--standby]
+//                                 [--port 8080]
 
 #include "http_server.h"
 #include "admission.h"
@@ -38,6 +40,10 @@
 #include "placement/device_select.h"
 #include "kvflash_pager.h"
 #include "kv_quant.h"
+#ifdef LUCE_MOSS_IMAGE
+#include "moss_image/image_server.h"
+#include "moss_image/pipeline.h"
+#endif
 
 #include <filesystem>
 #include <algorithm>
@@ -130,6 +136,13 @@ static void print_usage(const char * prog) {
         "                       Qwen4Exp auto-discovers <model repo>/MTP/mtp-*.gguf.\n"
         "  --mmproj <path>      Vision projector GGUF: enables image input (Qwen3.5/3.8, DS4V)\n"
         "  --mmproj-device hip:N  Run the DS4V image encoder on another GPU (one-GPU layout)\n"
+        "  --text-encoder <path> Qwen3.5-9B GGUF for a moss-image (text-to-image) model,\n"
+        "                       served with the images API; --host, --port and\n"
+        "                       --model-name apply to it\n"
+        "  --text-encoder-device hip:N  Run the moss-image text encoder on another GPU\n"
+        "  --standby            moss-image: share the GPU with another model. The weights\n"
+        "                       wait in host memory and the server gives its GPU memory\n"
+        "                       back on request (POST /memory/release, /memory/load)\n"
         "  --port <N>           Listen port (default: 8080)\n"
         "  --host <addr>        Bind address (default: 0.0.0.0)\n"
         "  --max-ctx <N|auto>   Max context length (default: 8192). auto: the model's\n"
@@ -444,20 +457,25 @@ struct ModelOptions {
 };
 
 // Native cache directory, or empty when no usable home/cache path is set.
-static std::string default_kv_cache_dir() {
+static std::string default_cache_dir() {
 #if defined(_WIN32)
     for (const char * variable : {"LOCALAPPDATA", "USERPROFILE"}) {
         const char * value = std::getenv(variable);
         if (value && *value && std::filesystem::path(value).is_absolute()) {
-            return (std::filesystem::path(value) / "lucebox" / "kv-cache").string();
+            return (std::filesystem::path(value) / "lucebox").string();
         }
     }
 #endif
     const char * xdg = std::getenv("XDG_CACHE_HOME");
-    if (xdg && xdg[0] == '/') return std::string(xdg) + "/lucebox/kv-cache";
+    if (xdg && xdg[0] == '/') return std::string(xdg) + "/lucebox";
     const char * home = std::getenv("HOME");
-    if (home && home[0] == '/') return std::string(home) + "/.cache/lucebox/kv-cache";
+    if (home && home[0] == '/') return std::string(home) + "/.cache/lucebox";
     return std::string();
+}
+
+static std::string default_kv_cache_dir() {
+    const std::string dir = default_cache_dir();
+    return dir.empty() ? dir : (std::filesystem::path(dir) / "kv-cache").string();
 }
 
 static int parse_model_options(int argc, char ** argv, ModelOptions & model,
@@ -2498,6 +2516,60 @@ static bool expand_launch_profile(std::vector<char *> & block,
     return true;
 }
 
+// A moss-image GGUF is a text-to-image model: the MOSS-Image engine serves it
+// with the images API instead of the LLM loader.
+static int run_moss_image(int argc, char ** argv) {
+#ifdef LUCE_MOSS_IMAGE
+    luce::moss_image::ImageServerConfig config;
+    luce::moss_image::PipelineOptions   pipeline_options;
+    pipeline_options.model_path = argv[1];
+    for (int i = 2; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--text-encoder") == 0 && i + 1 < argc) {
+            pipeline_options.text_encoder_path = argv[++i];
+        } else if (std::strcmp(argv[i], "--text-encoder-device") == 0 && i + 1 < argc) {
+            DevicePlacement device;
+            if (!parse_placement_device(argv[++i], device) || device.backend == PlacementBackend::Cuda) {
+                std::fprintf(stderr, "[server] bad --text-encoder-device value (expected hip:gpu)\n");
+                return 2;
+            }
+            pipeline_options.text_encoder_gpu = device.gpu;
+        } else if (std::strcmp(argv[i], "--standby") == 0) {
+            pipeline_options.standby = true;
+        } else if (std::strcmp(argv[i], "--host") == 0 && i + 1 < argc) {
+            config.host = argv[++i];
+        } else if (std::strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
+            config.port = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--model-name") == 0 && i + 1 < argc) {
+            config.model_id = argv[++i];
+        } else {
+            std::fprintf(stderr, "[server] %s does not apply to a moss-image model\n", argv[i]);
+            return 2;
+        }
+    }
+    if (pipeline_options.text_encoder_path.empty()) {
+        std::fprintf(stderr, "[server] a moss-image model needs --text-encoder <Qwen3.5-9B.gguf>\n");
+        return 2;
+    }
+    const std::string cache_dir = default_cache_dir();
+    if (!cache_dir.empty()) {
+        pipeline_options.tuning_path = (std::filesystem::path(cache_dir) / "moss-image-gemm.txt").string();
+    }
+    // load() returns once a request runs at full speed, so the port opens when the server is ready.
+    luce::moss_image::Pipeline pipeline;
+    std::string error;
+    if (!pipeline.load(pipeline_options, error)) {
+        std::fprintf(stderr, "[server] %s\n", error.c_str());
+        return 1;
+    }
+    return luce::moss_image::run_image_server(config, pipeline);
+#else
+    (void)argc;
+    std::fprintf(stderr, "[server] %s is a moss-image model; this build has no MOSS-Image engine (LUCE_MOSS_IMAGE)\n",
+                 argv[1]);
+    return 2;
+#endif
+}
+
 int main(int argc, char ** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "--list-devices") == 0) {
         if (argc > 3) {
@@ -2505,6 +2577,9 @@ int main(int argc, char ** argv) {
             return 2;
         }
         return list_devices(argc == 3 ? argv[2] : nullptr);
+    }
+    if (argc >= 2 && argv[1][0] != '-' && inspect_gguf_model_info(argv[1]).arch == "moss-image") {
+        return run_moss_image(argc, argv);
     }
 
     // Reuse the existing per-model CLI and loader. Argument strings belong to
