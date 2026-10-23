@@ -1362,6 +1362,88 @@ if(LUCE_TESTS)
         list(APPEND _raw_unit_test_targets test_mul_mat_host_input)
         luce_add_ggml_gpu_executable(test_rms_norm_scale test/unit/test_rms_norm_scale.cpp)
         list(APPEND _raw_unit_test_targets test_rms_norm_scale)
+        # Guards the fused RMS_NORM -> MUL -> ROPE [-> PERMUTE -> CONT] kernel (rope.cu): the qwen4exp Q/K/indexer
+        # chains must match (LUCE_NORM_ROPE_DEBUG=1 lines) and hash-equal the separate kernels (LUCE_ATTN_FUSE_LEGACY=1).
+        luce_add_ggml_gpu_executable(test_norm_rope_fusion test/unit/test_norm_rope_fusion.cpp)
+        list(APPEND _raw_unit_test_targets test_norm_rope_fusion)
+        # Guards the qsa3 attention store with the sigmoid gate folded in (qsa.cu): byte-identical F16 to the plain
+        # store + gate kernel. gfx1151 only.
+        add_executable(test_qsa3_gate_parity test/unit/test_qsa3_gate_parity.cpp)
+        set_source_files_properties(test/unit/test_qsa3_gate_parity.cpp PROPERTIES LANGUAGE HIP)
+        set_target_properties(test_qsa3_gate_parity PROPERTIES HIP_ARCHITECTURES "${_luce_archs}")
+        target_compile_definitions(test_qsa3_gate_parity PRIVATE GGML_USE_HIP)
+        target_include_directories(test_qsa3_gate_parity PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/deps/llama.cpp/ggml/include)
+        target_link_libraries(test_qsa3_gate_parity PRIVATE ggml ggml-base ${LUCE_GGML_BACKEND_TARGET} hip::host)
+        list(APPEND _raw_unit_test_targets test_qsa3_gate_parity)
+        # Guards the hc grouped norm node order (qwen4exp_graph.cpp hc_mix): gamma view expanded first makes
+        # RMS_NORM and MUL adjacent (fusable) and hash-equal to the legacy order.
+        luce_add_ggml_gpu_executable(test_hc_norm_mul_fusion test/unit/test_hc_norm_mul_fusion.cpp)
+        list(APPEND _raw_unit_test_targets test_hc_norm_mul_fusion)
+        # Guards the wave-per-row gated norm kernels (GDN tail ncols=128 with gamma,
+        # attention gate ncols=256 without) against the block-per-row kernels they
+        # replace: byte-identical F16 rows at T in {1,7,333,4096}.
+        add_executable(test_gated_norm_wave_parity test/unit/test_gated_norm_wave_parity.cpp)
+        set_source_files_properties(test/unit/test_gated_norm_wave_parity.cpp PROPERTIES LANGUAGE HIP)
+        set_target_properties(test_gated_norm_wave_parity PROPERTIES HIP_ARCHITECTURES "${_luce_archs}")
+        target_compile_definitions(test_gated_norm_wave_parity PRIVATE GGML_USE_HIP)
+        target_include_directories(test_gated_norm_wave_parity PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/deps/llama.cpp/ggml/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/deps/llama.cpp/ggml/src)
+        target_link_libraries(test_gated_norm_wave_parity PRIVATE
+            ggml
+            ggml-base
+            ${LUCE_GGML_BACKEND_TARGET}
+            hip::host)
+        list(APPEND _raw_unit_test_targets test_gated_norm_wave_parity)
+        # Guards the GDN q/k L2 norm folded into the gfx1151 conv epilogue against
+        # the plain conv + rms_norm_scale chain: bit-identical q/k and v channels
+        # at T in {256,333,4096} for the qwen4exp 10240-channel layout.
+        add_executable(test_gdn_conv_qknorm_parity test/unit/test_gdn_conv_qknorm_parity.cpp)
+        set_source_files_properties(test/unit/test_gdn_conv_qknorm_parity.cpp PROPERTIES LANGUAGE HIP)
+        set_target_properties(test_gdn_conv_qknorm_parity PROPERTIES HIP_ARCHITECTURES "${_luce_archs}")
+        target_compile_definitions(test_gdn_conv_qknorm_parity PRIVATE GGML_USE_HIP)
+        target_include_directories(test_gdn_conv_qknorm_parity PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/deps/llama.cpp/ggml/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/deps/llama.cpp/ggml/src)
+        target_link_libraries(test_gdn_conv_qknorm_parity PRIVATE
+            ggml
+            ggml-base
+            ${LUCE_GGML_BACKEND_TARGET}
+            hip::host)
+        list(APPEND _raw_unit_test_targets test_gdn_conv_qknorm_parity)
+        # Guards the QSA3 prefill union builder (qsa.cu): the bitmap kernel
+        # (default), the compacting rows kernel + merge (LUCE_ATTN_PREFILL_LEGACY=1)
+        # and the legacy rank-sort rows kernel must all
+        # match a CPU set union on qsa_decode_ids-style rows with holes, shuffled
+        # rows and out-of-range keys.
+        add_executable(test_qsa3_union_parity test/unit/test_qsa3_union_parity.cpp)
+        set_source_files_properties(test/unit/test_qsa3_union_parity.cpp PROPERTIES LANGUAGE HIP)
+        set_target_properties(test_qsa3_union_parity PROPERTIES HIP_ARCHITECTURES "${_luce_archs}")
+        target_compile_definitions(test_qsa3_union_parity PRIVATE GGML_USE_HIP)
+        target_include_directories(test_qsa3_union_parity PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/deps/llama.cpp/ggml/include)
+        target_link_libraries(test_qsa3_union_parity PRIVATE
+            ggml
+            ggml-base
+            ${LUCE_GGML_BACKEND_TARGET}
+            hip::host)
+        list(APPEND _raw_unit_test_targets test_qsa3_union_parity)
+        # Guards the per-forward M-RoPE cos/sin table (rope.cu): bit-identical to the inline FP64 angle
+        # code (child process under LUCE_ATTN_PREFILL_LEGACY=1) across two computes that reuse the positions tensor.
+        luce_add_ggml_gpu_executable(test_rope_table_parity test/unit/test_rope_table_parity.cpp)
+        list(APPEND _raw_unit_test_targets test_rope_table_parity)
+        # Guards the 16-byte strided same-type CPY (cpy.cu cpy_vec16, the qwen4exp K/V cache append): byte-identical
+        # to a host reference on the vector-eligible shapes and on the shapes that fall back to the scalar kernel.
+        luce_add_ggml_gpu_executable(test_cpy_vec_parity test/unit/test_cpy_vec_parity.cpp)
+        list(APPEND _raw_unit_test_targets test_cpy_vec_parity)
+        # Guards the fused PLE conv matcher (ple-conv.cu): the qwen4exp subgraph must match (no LUCE_PLE_DEBUG
+        # "no match" lines) and hash-equal the unfused nodes (child process under LUCE_PLE_FUSE_LEGACY=1).
+        luce_add_ggml_gpu_executable(test_ple_conv_fusion test/unit/test_ple_conv_fusion.cpp)
+        list(APPEND _raw_unit_test_targets test_ple_conv_fusion)
+        # Guards the PLE grouped norm node order: with the gamma view expanded first RMS_NORM and MUL are adjacent (the
+        # backend fuses them) and the output hash equals the unfused order.
+        luce_add_ggml_gpu_executable(test_ple_norm_mul_fusion test/unit/test_ple_norm_mul_fusion.cpp)
+        list(APPEND _raw_unit_test_targets test_ple_norm_mul_fusion)
         luce_add_ggml_gpu_executable(test_qwen4exp_indexer_score test/unit/test_qwen4exp_indexer_score.cpp)
         target_link_libraries(test_qwen4exp_indexer_score PRIVATE ggml-cpu)
         list(APPEND _raw_unit_test_targets test_qwen4exp_indexer_score)
