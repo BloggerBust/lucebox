@@ -1362,6 +1362,11 @@ if(LUCE_TESTS)
         list(APPEND _raw_unit_test_targets test_mul_mat_host_input)
         luce_add_ggml_gpu_executable(test_rms_norm_scale test/unit/test_rms_norm_scale.cpp)
         list(APPEND _raw_unit_test_targets test_rms_norm_scale)
+        # Guards the weight rows per wave on the batch-invariant Q8_0 multi-column MMVQ launch (mmvq.cu
+        # c_invariant_rpb, the MTP verify rows): every column byte-identical to its own one-column product at
+        # 1 / 2 / 4 rows per wave on the qwen4exp dense shapes.
+        luce_add_ggml_gpu_executable(test_mmvq_invariant_rows_parity test/unit/test_mmvq_invariant_rows_parity.cpp)
+        list(APPEND _raw_unit_test_targets test_mmvq_invariant_rows_parity)
         # Guards the fused RMS_NORM -> MUL -> ROPE [-> PERMUTE -> CONT] kernel (rope.cu): the qwen4exp Q/K/indexer
         # chains must match (LUCE_NORM_ROPE_DEBUG=1 lines) and hash-equal the separate kernels (LUCE_ATTN_FUSE_LEGACY=1).
         luce_add_ggml_gpu_executable(test_norm_rope_fusion test/unit/test_norm_rope_fusion.cpp)
