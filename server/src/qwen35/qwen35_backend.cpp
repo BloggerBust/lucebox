@@ -1048,6 +1048,7 @@ void Qwen35Backend::state_ladder_clear() {
     state_ladder_.clear();
     state_ladder_ckpt_bytes_ = 0;
     state_ladder_head_ = -1;
+    kvflash_gen_ckpt_pos_ = -1;
 }
 
 // State-only checkpoint (ssm + conv, no KV; plus target_feat when a drafter
@@ -1103,14 +1104,31 @@ int Qwen35Backend::kvflash_live_restore(const std::vector<int32_t> & prompt) {
     for (const auto & kv : state_ladder_) rungs.push_back(kv.first);
     const KvflashLiveRestore d =
         kvflash_live_restore_decide(prompt, kvflash_history_, cache_.cur_pos, rungs);
+    // S9: report whether the re-rendered history still covers the generation-end rung.
+    if (kvflash_gen_ckpt_pos_ > 0) {
+        std::printf("[kvflash] gen ckpt check: G=%d L=%d L>=G=%d", kvflash_gen_ckpt_pos_, d.L,
+                    d.L >= kvflash_gen_ckpt_pos_ ? 1 : 0);
+        if (d.L < kvflash_gen_ckpt_pos_) {
+            std::printf(" first-diff@%d prompt=[", d.L);
+            for (size_t i = d.L; i < prompt.size() && i < (size_t)d.L + 8; i++) std::printf("%s%d", i > (size_t)d.L ? "," : "", prompt[i]);
+            std::printf("] history=[");
+            for (size_t i = d.L; i < kvflash_history_.size() && i < (size_t)d.L + 8; i++) std::printf("%s%d", i > (size_t)d.L ? "," : "", kvflash_history_[i]);
+            std::printf("]");
+        }
+        std::printf("\n");
+        std::fflush(stdout);
+    }
     // Rungs above the common prefix describe tokens that no longer match.
     for (auto it = state_ladder_.upper_bound(d.discard_above); it != state_ladder_.end();) {
         free_prefix_snapshot(it->second.snap);
         it = state_ladder_.erase(it);
     }
+    // C need not be chunk-aligned: the S9 gen rung is off-grid, and
+    // pager.truncate (S5) zeroes the rows >= C of a partial chunk, which the
+    // replay then rewrites through slot_for.
     const int ct = kvflash_pager_.chunk_tokens();
     int C = d.C;
-    if (C > 0 && (ct <= 0 || C % ct != 0 || state_ladder_.find(C) == state_ladder_.end())) C = -1;
+    if (C > 0 && (ct <= 0 || state_ladder_.find(C) == state_ladder_.end())) C = -1;
     std::printf("[kvflash] live restore: L=%d C=%d replay=%d\n", d.L, C,
                 C > 0 ? (int)prompt.size() - C : (int)prompt.size());
     std::fflush(stdout);
@@ -2078,6 +2096,23 @@ GenerateResult Qwen35Backend::generate_impl(const GenerateRequest & req,
             std::chrono::steady_clock::now() - t_decode_start).count();
     }
 
+    // S9: checkpoint the DeltaNet state at the generation end so the next turn
+    // resumes after the answer. Speculative rollback and the early-stop repair
+    // (EOS, cancel inside a verified block) leave cur_pos at the committed
+    // position, where KV and state hold exactly history[0:G].
+    if (kvflash_session_enabled() && kvflash_active() && !cfg_.paged_attention &&
+        !has_images && req.n_gen > 0) {
+        const int G = kvflash_gen_ckpt_pos(cache_.cur_pos, kvflash_history_.size());
+        if (G > 0 && state_ladder_capture(G)) {
+            kvflash_gen_ckpt_pos_ = G;
+            std::printf("[kvflash] gen ckpt @%d\n", G);
+            std::fflush(stdout);
+        } else {
+            std::fprintf(stderr, "[kvflash] gen ckpt skipped (cur_pos=%d history=%zu)\n",
+                         cache_.cur_pos, kvflash_history_.size());
+        }
+    }
+
     result.succeed();
     return result;
 }
@@ -2537,6 +2572,17 @@ int Qwen35Backend::do_prefill(const std::vector<int32_t> & tokens,
     // (snap_pos); ponytail: no separate system-anchor length is plumbed, so
     // without a snap_pos the head rung is simply absent.
     std::vector<int> ladder;
+    int turn_cut = -1;
+    std::vector<int> turn_cuts;
+    if (kvflash_active() && !images) {
+        // Every pooled prefill (cold included, ladder or not, session on or off)
+        // cuts after every assistant header, so a restore at a turn rung replays
+        // the batches a cold prefill ran. Like the 512 grid this does not depend
+        // on LUCE_KVFLASH_SESSION: the session-off arm is the cold reference, and
+        // with cuts only on one side the two arms batch, and round, differently.
+        turn_cuts = kvflash_turn_cuts(tokens, w_.im_start_id, w_.assistant_id, w_.newline_id);
+        for (int & c : turn_cuts) c += kv_offset;
+    }
     // A cold prefill replaces the live session, image or not: drop its rungs.
     if (kvflash_active() && kvflash_session_enabled() && kv_offset == 0) state_ladder_clear();
     if (kvflash_active() && !images && kvflash_session_enabled()) {
@@ -2544,9 +2590,20 @@ int Qwen35Backend::do_prefill(const std::vector<int32_t> & tokens,
         if (!kvflash_live_restore_active_ || snap_pos > 0) {
             state_ladder_head_ = snap_pos > 0 ? snap_pos / kQwen35PrefillUbatch * kQwen35PrefillUbatch : -1;
         }
+        // S9b: an exact rung just after the last assistant header (Pend - k).
+        if (!turn_cuts.empty()) turn_cut = turn_cuts.back();
         ladder = kvflash_state_ladder_positions(snap_pos, kv_offset + prompt_len,
-                                                kQwen35PrefillUbatch, 8192);
+                                                kQwen35PrefillUbatch, 8192, turn_cut);
     }
+    // Pooled boundary snapshot: the last chunk-aligned batch start <= snap_pos
+    // (a turn cut can start the batch that holds snap_pos off the chunk grid,
+    // and a pooled snapshot there could never be consumed).
+    const int pooled_snap_at =
+        kvf_paged && snap_slot >= 0
+            ? kvflash_pooled_snapshot_pos(kv_offset, kv_offset + prompt_len, kQwen35PrefillUbatch,
+                                          prefill_ubatch, turn_cuts, snap_pos,
+                                          kvflash_pager_.chunk_tokens())
+            : -1;
 
     // Chunked prefill
     std::vector<float> embed_buf((size_t)hidden * prefill_ubatch);
@@ -2565,7 +2622,7 @@ int Qwen35Backend::do_prefill(const std::vector<int32_t> & tokens,
         // kvflash_prefill_batch_end) and never snapshots mid-batch.
         const int n_tokens = kvf_paged
             ? kvflash_prefill_batch_end(kv_pos, kv_offset + prompt_len,
-                                        kQwen35PrefillUbatch, prefill_ubatch) - kv_pos
+                                        kQwen35PrefillUbatch, prefill_ubatch, turn_cuts) - kv_pos
             : qwen35_prefill_chunk_tokens(
                   kv_pos, prompt_len - start, prefill_ubatch, restore_points,
                   start == 0 && restored_off_grid ? kQwen35OffGridLeadTokens
@@ -2576,6 +2633,25 @@ int Qwen35Backend::do_prefill(const std::vector<int32_t> & tokens,
         // later request that shares only that prefix still restores a valid
         // hit. (Rounding UP would include tokens past the cut, e.g. a user
         // message another request does not share.)
+        // Pooled: the snapshot lands on pooled_snap_at, which is this batch's
+        // start or an earlier one; the batch holding snap_pos then only clears
+        // the request.
+        if (kvf_paged && snap_slot >= 0 && kv_pos == pooled_snap_at &&
+            luce::common::kvflash_restore_consume_enabled()) {
+            // kv_pos starts a pooled ubatch on a chunk multiple; cur_pos is
+            // already kv_pos. Serialize the pager chunks [0, kv_pos/chunk).
+            cache_.cur_pos = kv_pos;
+            if (snapshot_save_pooled_at(snap_slot, kv_pos)) {
+                std::printf("[snap] pooled boundary slot=%d cur_pos=%d "
+                            "(req snap_pos=%d chunks=%d)\n", snap_slot,
+                            kv_pos, snap_pos, kv_pos / kvflash_pager_.chunk_tokens());
+                std::fflush(stdout);
+            } else {
+                std::fprintf(stderr, "[kvflash] pooled boundary snapshot failed "
+                                     "at kv_pos=%d\n", kv_pos);
+            }
+            snap_slot = -1;
+        }
         if (snap_slot >= 0 && snap_pos >= 0 &&
             kv_pos <= snap_pos && snap_pos < kv_pos + n_tokens) {
             if (kv_pos > kv_offset && !kvf_paged) {   // skip degenerate / relocated
@@ -2585,23 +2661,11 @@ int Qwen35Backend::do_prefill(const std::vector<int32_t> & tokens,
                                 snap_slot, kv_pos, snap_pos);
                     std::fflush(stdout);
                 }
-            } else if (kvf_paged && kv_pos > kv_offset &&
-                       luce::common::kvflash_restore_consume_enabled()) {
-                // kv_pos starts a pooled ubatch (chunk multiple); cur_pos is
-                // already kv_pos. Serialize the pager chunks [0, kv_pos/chunk).
-                cache_.cur_pos = kv_pos;
-                if (snapshot_save_pooled_at(snap_slot, kv_pos)) {
-                    std::printf("[snap] pooled boundary slot=%d cur_pos=%d "
-                                "(req snap_pos=%d chunks=%d)\n", snap_slot,
-                                kv_pos, snap_pos, kv_pos / kvflash_pager_.chunk_tokens());
-                    std::fflush(stdout);
-                } else {
-                    std::fprintf(stderr, "[kvflash] pooled boundary snapshot failed "
-                                         "at kv_pos=%d\n", kv_pos);
-                }
             } else if (kvf_paged) {
-                std::fprintf(stderr, "[kvflash] boundary snapshot skipped: pooled "
-                                     "prefill relocates chunks\n");
+                std::fprintf(stderr, "[kvflash] boundary snapshot skipped: %s\n",
+                             luce::common::kvflash_restore_consume_enabled()
+                                 ? "no chunk-aligned batch start at or below the cut"
+                                 : "pooled prefill relocates chunks");
             }
             snap_pos = -1;
             snap_slot = -1;
@@ -4813,6 +4877,28 @@ bool Qwen35Backend::do_spec_decode(int committed, ThinkingBudget & budget,
                     vocab_v, sampler_, out_tokens, sampler_rng_);
             } else {
                 last_tok = replay_last_tok;
+            }
+            // The target ran all commit_n tokens. After an early stop (EOS,
+            // cancel) its recurrent state and feature ring are ahead of the
+            // emitted prefix: restore the pre-step snapshot and replay only
+            // the emitted tokens, as the floor path does. A budget close is
+            // repaired below.
+            if (spec_early_stop_needs_repair(commit_n, emitted, budget_close_fired)) {
+                if (!target->restore_kv()) {
+                    step_graph_destroy(draft_sg);
+                    return false;
+                }
+                cache_.cur_pos = committed;
+                std::vector<int32_t> replay_prefix(replay_tok.begin(),
+                                                   replay_tok.begin() + emitted);
+                int prefix_last_tok = -1;
+                if (!target->verify_batch(replay_prefix, committed,
+                                          prefix_last_tok, nullptr)) {
+                    std::fprintf(stderr, "spec-decode: early-stop prefix replay failed\n");
+                    step_graph_destroy(draft_sg);
+                    return false;
+                }
+                target_forwards++;
             }
             committed += emitted;
         }
